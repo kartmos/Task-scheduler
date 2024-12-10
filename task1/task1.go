@@ -19,21 +19,17 @@ func timeIt(f func()) time.Duration {
 }
 func summary(input chan int, output chan int) {
 	sum := 0
-	defer close(output)
 	for item := range input {
 		sum += item
 	}
 	output <- sum
-
+	close(output)
 }
-func summarize(input chan []int8, output chan int, signal *sync.WaitGroup) {
+func summarize(input []int8, output chan int, signal *sync.WaitGroup) {
 	defer signal.Done()
 	sum := 0
-	for item := range input {
-		slice := item
-		for _, val := range slice {
-			sum += int(val)
-		}
+	for _, val := range input {
+		sum += int(val)
 	}
 	output <- sum
 }
@@ -44,20 +40,23 @@ func generateN(nums []int8) {
 	}
 }
 
-func generator(input chan []int8, output chan []int8, signal *sync.WaitGroup) {
+func generator(input chan []int8, output chan []int8, inputSum chan []int8, signal *sync.WaitGroup) {
 	defer signal.Done()
 	slice := <-input
 	generateN(slice)
 	output <- slice
+	inputSum <- slice
 }
 
 func main() {
-	size := 100
-	treads := 3
+	size := 1_000_000_000
+	treads := 4
 	batch_size := size / treads
 
 	number := make([]int8, size)
-	var signal sync.WaitGroup
+	var signalGeneration sync.WaitGroup
+	var signalSummary sync.WaitGroup
+
 	inputSlice := make(chan []int8)
 	outputSlice := make(chan []int8, treads)
 	inputSum := make(chan []int8, treads)
@@ -70,20 +69,21 @@ func main() {
 		cursor := 0
 		defer close(inputSlice)
 		for i := 0; i < treads; i++ {
-			signal.Add(1)
-			go generator(inputSlice, outputSlice, &signal)
+			signalGeneration.Add(1)
+			go generator(inputSlice, outputSlice, inputSum, &signalGeneration)
 		}
 		for i := 0; i < treads; i++ {
 			if i == treads-1 {
-				inputSlice <- number[cursor:size]
+				inputSlice <- append([]int8{}, number[cursor:size]...)
 			} else {
-				inputSlice <- number[cursor : cursor+batch_size]
+				inputSlice <- append([]int8{}, number[cursor:cursor+batch_size]...)
 				cursor += batch_size
 			}
 		}
 		go func() {
-			signal.Wait()
+			signalGeneration.Wait()
 			close(outputSlice)
+			close(inputSum)
 		}()
 		index := 0
 		for item := range outputSlice {
@@ -92,26 +92,23 @@ func main() {
 				index++
 			}
 		}
-		fmt.Printf("Biuld slice: %d  Len: %d\n", number, len(number))
+		// fmt.Printf("Biuld slice: %v  Len: %d\n", number, len(number))
 	})
 	fmt.Println("Time generation result:", dur)
 
 	dur = timeIt(func() {
-		defer close(inputSum)
-		for slice := range outputSlice {
-			inputSum <- slice
-		}
-		for i := 0; i < treads; i++ {
-			signal.Add(1)
-			go summarize(inputSum, outputSum, &signal)
+		for slice := range inputSum {
+			signalSummary.Add(1)
+			go summarize(slice, outputSum, &signalSummary)
 		}
 		go func() {
-			signal.Wait()
+			signalSummary.Wait()
 			close(outputSum)
 		}()
-		summary(outputSum, resault)
+
+		go summary(outputSum, resault)
+
 		sum := <-resault
 		fmt.Println("Sum = ", sum)
-
 	})
 }
