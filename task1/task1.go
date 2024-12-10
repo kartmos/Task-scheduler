@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -16,11 +17,23 @@ func timeIt(f func()) time.Duration {
 	f()
 	return time.Since(t)
 }
-
-func executeSum(nums []int8, output chan int) {
+func summary(input chan int, output chan int) {
 	sum := 0
-	for _, r := range nums {
-		sum += int(r)
+	defer close(output)
+	for item := range input {
+		sum += item
+	}
+	output <- sum
+
+}
+func summarize(input chan []int8, output chan int, signal *sync.WaitGroup) {
+	defer signal.Done()
+	sum := 0
+	for item := range input {
+		slice := item
+		for _, val := range slice {
+			sum += int(val)
+		}
 	}
 	output <- sum
 }
@@ -31,68 +44,74 @@ func generateN(nums []int8) {
 	}
 }
 
-func generator(lenghtSlice int, output chan []int8, waitSignal chan bool) {
-	defer func() { waitSignal <- true }()
-	slice := make([]int8, lenghtSlice)
+func generator(input chan []int8, output chan []int8, signal *sync.WaitGroup) {
+	defer signal.Done()
+	slice := <-input
 	generateN(slice)
 	output <- slice
-	fmt.Println("generation slice:", slice, len(slice), output)
-
 }
 
 func main() {
 	size := 100
-	chanel := 3
-	batch_size := size / chanel
+	treads := 3
+	batch_size := size / treads
 
-	number := []int8{}
-	outputChan := make(chan []int8)
-	waitSignal := make(chan bool)
-	sumChan := make(chan int)
+	number := make([]int8, size)
+	var signal sync.WaitGroup
+	inputSlice := make(chan []int8)
+	outputSlice := make(chan []int8, treads)
+	inputSum := make(chan []int8, treads)
+	outputSum := make(chan int, treads)
+	resault := make(chan int)
 
 	var dur time.Duration
 
 	dur = timeIt(func() {
 		cursor := 0
-		lenghtSlice := 0
-		for i := 0; i < chanel; i++ {
-			if i == chanel-1 {
-				lenghtSlice = batch_size + size%chanel
-				go generator(lenghtSlice, outputChan, waitSignal)
+		defer close(inputSlice)
+		for i := 0; i < treads; i++ {
+			signal.Add(1)
+			go generator(inputSlice, outputSlice, &signal)
+		}
+		for i := 0; i < treads; i++ {
+			if i == treads-1 {
+				inputSlice <- number[cursor:size]
 			} else {
-				lenghtSlice = batch_size
-				go generator(lenghtSlice, outputChan, waitSignal)
+				inputSlice <- number[cursor : cursor+batch_size]
 				cursor += batch_size
 			}
 		}
 		go func() {
-			defer close(outputChan)
-			for i := 0; i < chanel; i++ {
-				<-waitSignal
-			}
+			signal.Wait()
+			close(outputSlice)
 		}()
-		for item := range outputChan {
-			number = append(number, item...)
+		index := 0
+		for item := range outputSlice {
+			for _, val := range item {
+				number[index] = val
+				index++
+			}
 		}
 		fmt.Printf("Biuld slice: %d  Len: %d\n", number, len(number))
 	})
 	fmt.Println("Time generation result:", dur)
 
-	sum := 0
-
 	dur = timeIt(func() {
-		cursor := 0
-		for i := 0; i < chanel; i++ {
-			if i == chanel-1 {
-				go executeSum(number[cursor:size], sumChan)
-			} else {
-				go executeSum(number[cursor:cursor+batch_size], sumChan)
-				cursor += batch_size
-			}
+		defer close(inputSum)
+		for slice := range outputSlice {
+			inputSum <- slice
 		}
-		for i := 0; i < chanel; i++ {
-			sum += <-sumChan
+		for i := 0; i < treads; i++ {
+			signal.Add(1)
+			go summarize(inputSum, outputSum, &signal)
 		}
+		go func() {
+			signal.Wait()
+			close(outputSum)
+		}()
+		summary(outputSum, resault)
+		sum := <-resault
+		fmt.Println("Sum = ", sum)
+
 	})
-	fmt.Println("Summarize result: ", sum, dur)
 }
