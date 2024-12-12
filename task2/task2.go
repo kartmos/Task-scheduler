@@ -12,38 +12,42 @@ import (
 	"sync"
 )
 
-var treadsSum int
-var treadsGen int
-var sizeNumber int
+var threadsSum int
+var threadsGen int
+var size int
 var batchSize int
 
 func init() {
-	flag.IntVar(&treadsSum, "s", 1, "Count treads Sum")
-	flag.IntVar(&treadsGen, "g", 1, "Count treads Gen")
+	flag.IntVar(&threadsSum, "s", 1, "Count treads Sum")
+	flag.IntVar(&threadsGen, "g", 1, "Count treads Gen")
 	flag.IntVar(&batchSize, "b", 1, "Slice size")
-	flag.IntVar(&sizeNumber, "sN", 1, "Batch Size")
+	flag.IntVar(&size, "sN", 1, "Batch Size")
 }
 
-func reducer(input chan int, output chan int, signal *sync.WaitGroup) {
-	defer signal.Done()
+func reducer(input chan int, output chan int) {
+	defer close(output)
 	sum := 0
 	for item := range input {
 		sum += item
 	}
 	output <- sum
-
 }
 
-func summary(slice []int8) int {
-	sum := 0
+func reduce(input chan int) <-chan int {
+	oneShot := make(chan int)
+	go reducer(input, oneShot)
+	return oneShot
+}
+
+func summary(slice []int8) (sum int) {
 	for _, val := range slice {
 		sum += int(val)
 	}
-	return sum
+	return
 }
 
-func summarize(input chan []int8, output chan int, signal *sync.WaitGroup) {
-	defer signal.Done()
+func summarize(input chan []int8, output chan int, wg *sync.WaitGroup) {
+	defer wg.Done()
 	for slice := range input {
 		output <- summary(slice)
 	}
@@ -55,6 +59,7 @@ func generateN(slice []int8) []int8 {
 	}
 	return slice
 }
+
 func generator(input chan []int8, output chan []int8, signal *sync.WaitGroup) {
 	defer signal.Done()
 	for slice := range input {
@@ -62,62 +67,87 @@ func generator(input chan []int8, output chan []int8, signal *sync.WaitGroup) {
 	}
 }
 
+func guard(wg *sync.WaitGroup, closeChan any) {
+	wg.Wait()
+
+	switch closeChan := closeChan.(type) {
+	case chan []int8:
+		close(closeChan)
+	case chan int:
+		close(closeChan)
+	default:
+		panic("wtf don't what to do")
+	}
+}
+
+// Generic guard
+func gg[T chan int | chan []int8](wg *sync.WaitGroup, closeChan T) {
+	wg.Wait()
+	close(closeChan)
+}
+
+func pusher(v []int8, bs int) (output chan []int8) {
+	size := len(v)
+	go func() {
+		defer close(output)
+		for c := 0; c < size; c += bs {
+			output <- v[c:min(c+bs, size)]
+		}
+	}()
+	return
+}
+
+func work[I any, O any](input chan I, output chan O, wg *sync.WaitGroup, execute func(msg I) O) {
+	defer wg.Done()
+	for msg := range input {
+		output <- execute(msg)
+	}
+}
+
+func pool[I any, O any](input chan I, n int, execute func(msg I) O) (output chan O) {
+	wg := &sync.WaitGroup{}
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go work(input, output, wg, execute)
+	}
+
+	go func() {
+		wg.Wait()
+		close(output)
+	}()
+
+	return
+}
+
 func main() {
 	flag.Parse()
 
-	var signalGeneration sync.WaitGroup
-	var signalSummarize sync.WaitGroup
-	var signalReduce sync.WaitGroup
+	var wgGen sync.WaitGroup
+	var wgSum sync.WaitGroup
 
-	batchCount := sizeNumber / batchSize
-	number := make([]int8, sizeNumber)
-	sum := 0
+	numbers := make([]int8, size)
 
-	inputSlice := make(chan []int8)
-	outputSlice := make(chan []int8)
-	inputSum := make(chan int)
-	result := make(chan int)
+	input := pusher(numbers, batchSize)
+	bridge := make(chan []int8)
 
-	go func() {
-		defer close(inputSlice)
-		cursor := 0
-		for i := 0; i < batchCount; i++ {
-			if i == batchCount-1 {
-				inputSlice <- number[cursor:sizeNumber]
-			} else {
-				inputSlice <- number[cursor : cursor+batchSize]
-				cursor += batchSize
-			}
-		}
-	}()
-
-	for i := 0; i < treadsGen; i++ {
-		signalGeneration.Add(1)
-		go generator(inputSlice, outputSlice, &signalGeneration)
+	for i := 0; i < threadsGen; i++ {
+		wgGen.Add(1)
+		go generator(input, bridge, &wgGen)
 	}
 
-	go func() {
-		signalGeneration.Wait()
-		close(outputSlice)
-	}()
+	go gg(&wgGen, bridge)
 
-	for i := 0; i < treadsSum; i++ {
-		signalSummarize.Add(1)
-		go summarize(outputSlice, inputSum, &signalSummarize)
+	output := make(chan int)
+
+	for i := 0; i < threadsSum; i++ {
+		wgSum.Add(1)
+		go summarize(bridge, output, &wgSum)
 	}
-	go func() {
-		signalSummarize.Wait()
-		close(inputSum)
-	}()
 
-	signalReduce.Add(1)
-	go reducer(inputSum, result, &signalReduce)
-	sum = <-result
+	go gg(&wgSum, output)
 
-	go func() {
-		signalReduce.Wait()
-		close(result)
-	}()
+	sum := <-reduce(output)
+
 	fmt.Println("Result sum: ", sum)
-	fmt.Println("Len: ", len(number))
+	fmt.Println("Len: ", len(numbers))
 }
