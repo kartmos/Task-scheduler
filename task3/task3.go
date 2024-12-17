@@ -12,15 +12,12 @@ func generateN(limit int) chan int {
 
 	go func() {
 		defer close(output)
-		slice := make([]int, 0)
-		for n := rand.Intn(10); n < math.MaxInt && limit > 0; n += rand.Intn(10)+1 {
+		for n := rand.Intn(10); n < math.MaxInt && limit > 0; n += rand.Intn(10) + 1 {
 			limit--
 			output <- n
-			slice = append(slice, n)
 			dur := int(rand.Intn(100)) * int(time.Microsecond)
 			time.Sleep(time.Duration(dur))
 		}
-		fmt.Printf("Slice: %d\n", slice)
 	}()
 
 	return output
